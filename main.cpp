@@ -92,6 +92,8 @@ public:
 	uring& operator=(uring&&) = delete;
 	~uring();
 
+	void register_fd(int fd);
+
 private:
 	struct io_uring ring_;
 };
@@ -102,10 +104,20 @@ uring::uring(unsigned int entries, unsigned int flags) {
 	ret = io_uring_queue_init(entries, &ring_, flags);
 	if (ret < 0)
 		throw std::system_error(-ret, std::system_category());
+
+	ret = io_uring_register_ring_fd(&ring_);
+	if (ret < 0)
+		throw std::system_error(-ret, std::system_category());
 }
 
 uring::~uring() {
 	io_uring_queue_exit(&ring_);
+}
+
+void uring::register_fd(int fd) {
+	int ret = io_uring_register_files(&ring_, &fd, 1);
+	if (ret < 0)
+		throw std::system_error(-ret, std::system_category());
 }
 
 class write_bench_base {
