@@ -7,13 +7,14 @@
 #include <memory>
 #include <vector>
 
-
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+#include <liburing.h>
 
 
 using clock_type = std::chrono::high_resolution_clock;
@@ -80,6 +81,31 @@ posix_file::mmap_ptr posix_file::map() {
 
 posix_file::~posix_file() {
 	close(fd_);
+}
+
+class uring {
+public:
+	uring(unsigned int entries, unsigned int flags);
+	uring(const uring&) = delete;
+	uring(uring&&) = delete;
+	uring& operator=(const uring&) = delete;
+	uring& operator=(uring&&) = delete;
+	~uring();
+
+private:
+	struct io_uring ring_;
+};
+
+uring::uring(unsigned int entries, unsigned int flags) {
+	int ret = 0;
+
+	ret = io_uring_queue_init(entries, &ring_, flags);
+	if (ret < 0)
+		throw std::system_error(-ret, std::system_category());
+}
+
+uring::~uring() {
+	io_uring_queue_exit(&ring_);
 }
 
 class write_bench_base {
