@@ -47,6 +47,10 @@ public:
 	}
 
 	mmap_ptr map();
+
+	operator int() const noexcept {
+		return fd_;
+	}
 private:
 	int fd_;
 };
@@ -93,6 +97,7 @@ public:
 	~uring();
 
 	void register_fd(int fd);
+	operator struct io_uring* () noexcept;
 
 private:
 	struct io_uring ring_;
@@ -118,6 +123,10 @@ void uring::register_fd(int fd) {
 	int ret = io_uring_register_files(&ring_, &fd, 1);
 	if (ret < 0)
 		throw std::system_error(-ret, std::system_category());
+}
+
+uring::operator struct io_uring* () noexcept {
+	return &ring_;
 }
 
 class write_bench_base {
@@ -236,13 +245,70 @@ std::vector<write_bench_base::bench_point> write_bench_mmap::run() {
 	return res;
 }
 
+class write_bench_uring:
+	public write_bench_base {
+private:
+	unsigned int entries_;
+
+public:
+	write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries);
+
+	std::vector<bench_point> run() override;
+};
+
+write_bench_uring::write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries):
+	write_bench_base(object_size, size),
+	entries_{entries} {}
+
+std::vector<write_bench_base::bench_point> write_bench_uring::run() {
+	std::vector<bench_point> res;
+	res.reserve(size() + 1);
+
+	{
+	uring r{entries_, IORING_SETUP_SINGLE_ISSUER};
+	posix_file target{std::string("/mnt/test.bin"), size() * data().size()};
+	r.register_fd(target);
+
+	res.emplace_back(bench_point{clock_type::now(), 0});
+
+	std::size_t in_flight = 0;
+	for (std::size_t i = 0; i < size() || in_flight > 0;) {
+		for (; i < size() && in_flight < entries_; ++i, ++in_flight) {
+			struct io_uring_sqe *sqe = io_uring_get_sqe(r);
+			io_uring_prep_write(sqe, target, data().data(), data().size(), i * data().size());
+			io_uring_sqe_set_data64(sqe, i);
+		}
+
+		int ret = io_uring_submit_and_wait(r, 1);
+		if (ret < 0)
+			throw std::system_error(-ret, std::system_category());
+
+		struct io_uring_cqe *cqe;
+
+		while (io_uring_peek_cqe(r, &cqe) == 0) {
+			if (cqe->res < 0)
+				throw std::system_error(-cqe->res, std::system_category());
+
+			io_uring_cqe_seen(r, cqe);
+
+			--in_flight;
+		}
+
+		res.emplace_back(bench_point{clock_type::now(), (i - in_flight) * data().size()});
+	}
+
+	} // target
+
+	return res;
+}
+
 int main(int argc, char** argv) {
 	constexpr std::size_t objects = 3 * 1024;
 	constexpr std::size_t object_size = 1024 * 1024 * 16;
 
-	using write_becnh_type = write_bench_mmap;
+	using write_bench_type = write_bench_uring;
 
-	write_becnh_type bench{object_size, objects};
+	write_bench_type bench{object_size, objects, 1 << 4};
 
 	const auto res = bench.run();
 
