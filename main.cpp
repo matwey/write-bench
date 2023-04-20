@@ -275,8 +275,9 @@ std::vector<write_bench_base::bench_point> write_bench_uring::run() {
 	for (std::size_t i = 0; i < size() || in_flight > 0;) {
 		for (; i < size() && in_flight < entries_; ++i, ++in_flight) {
 			struct io_uring_sqe *sqe = io_uring_get_sqe(r);
-			io_uring_prep_write(sqe, target, data().data(), data().size(), i * data().size());
+			io_uring_prep_write(sqe, 0 /* registered file */, data().data(), data().size(), i * data().size());
 			io_uring_sqe_set_data64(sqe, i);
+			io_uring_sqe_set_flags(sqe, IOSQE_FIXED_FILE);
 		}
 
 		int ret = io_uring_submit_and_wait(r, 1);
