@@ -7,6 +7,8 @@
 #include <memory>
 #include <vector>
 
+#include <boost/align/aligned_allocator.hpp>
+
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -97,6 +99,7 @@ public:
 	~uring();
 
 	void register_fd(int fd);
+	void register_buffer(const void* buf, std::size_t size);
 	operator struct io_uring* () noexcept;
 
 private:
@@ -125,6 +128,16 @@ void uring::register_fd(int fd) {
 		throw std::system_error(-ret, std::system_category());
 }
 
+void uring::register_buffer(const void* buf, std::size_t size) {
+	struct iovec iov;
+	iov.iov_base = const_cast<void*>(buf);
+	iov.iov_len = size;
+
+	int ret = io_uring_register_buffers(&ring_, &iov, 1);
+	if (ret < 0)
+		throw std::system_error(-ret, std::system_category());
+}
+
 uring::operator struct io_uring* () noexcept {
 	return &ring_;
 }
@@ -132,7 +145,7 @@ uring::operator struct io_uring* () noexcept {
 class write_bench_base {
 private:
 	std::size_t size_;
-	std::vector<std::uint8_t> data_;
+	std::vector<std::uint8_t, boost::alignment::aligned_allocator<std::uint8_t, 4096>> data_;
 
 public:
 	struct bench_point {
@@ -249,16 +262,18 @@ class write_bench_uring:
 	public write_bench_base {
 private:
 	unsigned int entries_;
+	bool direct_;
 
 public:
-	write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries);
+	write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries, bool direct = false);
 
 	std::vector<bench_point> run() override;
 };
 
-write_bench_uring::write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries):
+write_bench_uring::write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries, bool direct):
 	write_bench_base(object_size, size),
-	entries_{entries} {}
+	entries_{entries},
+	direct_{direct} {}
 
 std::vector<write_bench_base::bench_point> write_bench_uring::run() {
 	std::vector<bench_point> res;
@@ -266,8 +281,9 @@ std::vector<write_bench_base::bench_point> write_bench_uring::run() {
 
 	{
 	uring r{entries_, IORING_SETUP_SINGLE_ISSUER};
-	posix_file target{std::string("/mnt/test.bin"), size() * data().size()};
+	posix_file target{std::string("/mnt/test.bin"), size() * data().size(), direct_};
 	r.register_fd(target);
+	r.register_buffer(data().data(), data().size());
 
 	res.emplace_back(bench_point{clock_type::now(), 0});
 
@@ -275,7 +291,8 @@ std::vector<write_bench_base::bench_point> write_bench_uring::run() {
 	for (std::size_t i = 0; i < size() || in_flight > 0;) {
 		for (; i < size() && in_flight < entries_; ++i, ++in_flight) {
 			struct io_uring_sqe *sqe = io_uring_get_sqe(r);
-			io_uring_prep_write(sqe, 0 /* registered file */, data().data(), data().size(), i * data().size());
+		//	io_uring_prep_write(sqe, 0 /* registered file */, data().data(), data().size(), i * data().size());
+			io_uring_prep_write_fixed(sqe, 0 /* registered file */, data().data(), data().size(), i * data().size(), 0 /* registered buffer */);
 			io_uring_sqe_set_data64(sqe, i);
 			io_uring_sqe_set_flags(sqe, IOSQE_FIXED_FILE);
 		}
@@ -309,7 +326,7 @@ int main(int argc, char** argv) {
 
 	using write_bench_type = write_bench_uring;
 
-	write_bench_type bench{object_size, objects, 1 << 4};
+	write_bench_type bench{object_size, objects, 1 << 4, true};
 
 	const auto res = bench.run();
 
