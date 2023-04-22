@@ -263,27 +263,34 @@ class write_bench_uring:
 private:
 	unsigned int entries_;
 	bool direct_;
+	bool fixed_;
 
 public:
-	write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries, bool direct = false);
+	write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries, bool direct = false, bool fixed = false);
 
 	std::vector<bench_point> run() override;
 };
 
-write_bench_uring::write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries, bool direct):
+write_bench_uring::write_bench_uring(std::size_t object_size, std::size_t size, unsigned int entries, bool direct, bool fixed):
 	write_bench_base(object_size, size),
 	entries_{entries},
-	direct_{direct} {}
+	direct_{direct},
+	fixed_{fixed} {}
 
 std::vector<write_bench_base::bench_point> write_bench_uring::run() {
 	std::vector<bench_point> res;
 	res.reserve(size() + 1);
 
+	const std::uint8_t opcode = (fixed_ ? IORING_OP_WRITE_FIXED : IORING_OP_WRITE);
+
 	{
 	uring r{entries_, IORING_SETUP_SINGLE_ISSUER};
 	posix_file target{std::string("/mnt/test.bin"), size() * data().size(), direct_};
 	r.register_fd(target);
-	r.register_buffer(data().data(), data().size());
+
+	if (fixed_) {
+		r.register_buffer(data().data(), data().size());
+	}
 
 	res.emplace_back(bench_point{clock_type::now(), 0});
 
@@ -291,10 +298,10 @@ std::vector<write_bench_base::bench_point> write_bench_uring::run() {
 	for (std::size_t i = 0; i < size() || in_flight > 0;) {
 		for (; i < size() && in_flight < entries_; ++i, ++in_flight) {
 			struct io_uring_sqe *sqe = io_uring_get_sqe(r);
-		//	io_uring_prep_write(sqe, 0 /* registered file */, data().data(), data().size(), i * data().size());
 			io_uring_prep_write_fixed(sqe, 0 /* registered file */, data().data(), data().size(), i * data().size(), 0 /* registered buffer */);
 			io_uring_sqe_set_data64(sqe, i);
 			io_uring_sqe_set_flags(sqe, IOSQE_FIXED_FILE);
+			sqe->opcode = opcode;
 		}
 
 		int ret = io_uring_submit_and_wait(r, 1);
@@ -326,7 +333,7 @@ int main(int argc, char** argv) {
 
 	using write_bench_type = write_bench_uring;
 
-	write_bench_type bench{object_size, objects, 1 << 4, true};
+	write_bench_type bench{object_size, objects, 1 << 4, false, true};
 
 	const auto res = bench.run();
 
