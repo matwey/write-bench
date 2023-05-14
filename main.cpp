@@ -10,6 +10,7 @@
 #include <boost/align/aligned_allocator.hpp>
 
 #include <errno.h>
+#include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -89,6 +90,37 @@ posix_file::~posix_file() {
 	close(fd_);
 }
 
+class stdio_file {
+public:
+	explicit stdio_file(const std::string& filename);
+	~stdio_file() noexcept;
+
+	stdio_file(const stdio_file&) = delete;
+	stdio_file(stdio_file&&) = delete;
+	stdio_file& operator=(const stdio_file&) = delete;
+	stdio_file& operator=(stdio_file&&) = delete;
+
+	template<class T>
+	void consume(const T* arr, std::size_t size) {
+		if (fwrite(reinterpret_cast<const void*>(arr), sizeof(T), size, file_) < 0)
+			throw std::system_error(errno, std::system_category());
+	}
+
+private:
+	FILE* file_;
+};
+
+stdio_file::stdio_file(const std::string& filename):
+	file_{fopen(filename.c_str(), "wb")} {
+
+	if (!file_)
+		throw std::system_error(errno, std::system_category());
+}
+
+stdio_file::~stdio_file() noexcept {
+	fclose(file_);
+}
+
 class uring {
 public:
 	uring(unsigned int entries, unsigned int flags);
@@ -113,9 +145,11 @@ uring::uring(unsigned int entries, unsigned int flags) {
 	if (ret < 0)
 		throw std::system_error(-ret, std::system_category());
 
+/*
 	ret = io_uring_register_ring_fd(&ring_);
 	if (ret < 0)
 		throw std::system_error(-ret, std::system_category());
+*/
 }
 
 uring::~uring() {
@@ -207,6 +241,38 @@ std::vector<write_bench_base::bench_point> write_bench_write::run() {
 	return res;
 }
 
+class write_bench_fwrite:
+	public write_bench_base {
+public:
+	write_bench_fwrite(std::size_t object_size, std::size_t size);
+
+	std::vector<bench_point> run() override;
+};
+
+write_bench_fwrite::write_bench_fwrite(std::size_t object_size, std::size_t size):
+	write_bench_base(object_size, size) {}
+
+std::vector<write_bench_base::bench_point> write_bench_fwrite::run() {
+	std::vector<bench_point> res;
+	res.reserve(size() + 1);
+
+	{
+
+	stdio_file target{std::string("/mnt/test.bin")};
+
+	for (std::size_t i = 0; i < size(); ++i) {
+		res.emplace_back(bench_point{clock_type::now(), i * data().size()});
+
+		target.consume(data().data(), data().size());
+	}
+
+	} // target
+
+	res.emplace_back(bench_point{clock_type::now(), size() * data().size()});
+
+	return res;
+}
+
 class write_bench_write_direct:
 	public write_bench_write {
 public:
@@ -284,7 +350,7 @@ std::vector<write_bench_base::bench_point> write_bench_uring::run() {
 	const std::uint8_t opcode = (fixed_ ? IORING_OP_WRITE_FIXED : IORING_OP_WRITE);
 
 	{
-	uring r{entries_, IORING_SETUP_SINGLE_ISSUER};
+	uring r{entries_, 0};//IORING_SETUP_SINGLE_ISSUER};
 	posix_file target{std::string("/mnt/test.bin"), size() * data().size(), direct_};
 	r.register_fd(target);
 
@@ -299,7 +365,6 @@ std::vector<write_bench_base::bench_point> write_bench_uring::run() {
 		for (; i < size() && in_flight < entries_; ++i, ++in_flight) {
 			struct io_uring_sqe *sqe = io_uring_get_sqe(r);
 			io_uring_prep_write_fixed(sqe, 0 /* registered file */, data().data(), data().size(), i * data().size(), 0 /* registered buffer */);
-			io_uring_sqe_set_data64(sqe, i);
 			io_uring_sqe_set_flags(sqe, IOSQE_FIXED_FILE);
 			sqe->opcode = opcode;
 		}
@@ -331,9 +396,10 @@ int main(int argc, char** argv) {
 	constexpr std::size_t objects = 3 * 1024;
 	constexpr std::size_t object_size = 1024 * 1024 * 16;
 
-	using write_bench_type = write_bench_uring;
+	using write_bench_type = write_bench_fwrite;
 
-	write_bench_type bench{object_size, objects, 1 << 4, false, true};
+	write_bench_type bench{object_size, objects};
+//	write_bench_type bench{object_size, objects, 1 << 4, true, true};
 
 	const auto res = bench.run();
 
